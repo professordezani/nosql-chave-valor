@@ -387,3 +387,192 @@ ZSCORE ranking:jogo1 "leo"
 ```
 ZREM ranking:jogo1 "carla"
 ```
+
+# Boas Práticas em Produção — Comandos e Exemplos
+
+**Como usar:** copie e cole os blocos de comando, em ordem, no `redis-cli` ou no
+**Workbench do RedisInsight**. Cada seção corresponde a um dos 6 cards do slide
+"Boas Práticas em Produção".
+
+---
+
+## 1. Nomeie chaves com padrão
+
+**Contexto:** usar namespaces com `:` organiza as chaves por entidade e facilita buscas, backups seletivos e leitura do código.
+
+**1)** Nomenclatura recomendada — hierarquia clara `entidade:id:atributo`.
+```
+SET usuario:102:perfil "dados do perfil"
+SET usuario:102:carrinho "dados do carrinho"
+```
+
+**2)** Com o padrão, fica fácil localizar tudo relacionado a um usuário específico (uso pontual — não rodar com bases grandes em produção, ver item 3).
+```
+KEYS usuario:102:*
+```
+
+**❌ Evite:** nomes sem padrão, como `dadosUser102`, `carrinho_102_v2`, `tempUser` — impossível de filtrar, agrupar ou dar manutenção depois.
+
+---
+
+## 2. Sempre defina TTL quando fizer sentido
+
+**Contexto:** dados temporários (sessões, cache, promoções, códigos de verificação) devem expirar sozinhos, evitando crescimento infinito de memória.
+
+**1)** Cria a chave já com expiração embutida (30 minutos = 1800 segundos).
+```
+SET sessao:abc123 "token-do-usuario" EX 1800
+```
+
+**2)** Verifica quanto tempo de vida resta.
+```
+TTL sessao:abc123
+```
+
+**3)** Define (ou redefine) o TTL de uma chave que já existe.
+```
+EXPIRE sessao:abc123 1800
+```
+
+**4)** Remove o TTL, tornando a chave permanente (use com cautela — é o oposto do que normalmente se quer).
+```
+PERSIST sessao:abc123
+```
+
+**❌ Evite:** criar chaves de sessão/cache/código-de-verificação com `SET` simples, sem `EX`/`EXPIRE` — elas nunca expiram e ficam ocupando memória para sempre.
+
+---
+
+## 3. Nunca use KEYS * em produção
+
+**Contexto:** `KEYS` varre o banco inteiro de uma vez e bloqueia o servidor (o Redis é single-thread) — em bases grandes isso pode travar todas as outras requisições por segundos. Use `SCAN`, que percorre aos poucos, sem bloquear.
+
+**1) ❌ Não faça isso em produção** (funciona, mas trava o servidor em bases grandes):
+```
+KEYS produto:*
+```
+
+**2) ✅ Alternativa segura** — itera em pequenos lotes (`COUNT` sugere o tamanho do lote), sem bloquear o servidor.
+```
+SCAN 0 MATCH produto:* COUNT 10
+```
+
+**3)** O `SCAN` retorna um **cursor** (um número) junto com o lote de chaves. Para continuar, rode o comando de novo passando esse cursor no lugar do `0`, até ele voltar a ser `0` (fim da varredura).
+```
+SCAN 26 MATCH produto:* COUNT 10
+```
+
+**Equivalente para outras estruturas:** assim como `KEYS` tem o `SCAN`, os comandos abaixo também têm suas versões "com cursor" — usadas no item 6.
+- `HSCAN` (para campos de um Hash)
+- `SSCAN` (para membros de um Set)
+- `ZSCAN` (para membros de um Sorted Set)
+
+---
+
+## 4. Monitore o uso de memória
+
+**Contexto:** o Redis guarda tudo em RAM — sem monitoramento, o servidor pode ficar sem memória disponível e começar a recusar escritas (ou pior, derrubar o processo).
+
+**1)** Visão geral do consumo de memória do servidor.
+```
+INFO memory
+```
+
+**2)** Quanto de memória uma chave específica está ocupando (em bytes) — útil para achar "chaves gigantes" que merecem atenção.
+```
+MEMORY USAGE produto:1
+```
+
+**3)** Consulta a política atual de remoção de chaves quando a memória máxima é atingida.
+```
+CONFIG GET maxmemory-policy
+```
+
+**4)** Define a política para descartar automaticamente as chaves menos usadas recentemente (LRU) quando a memória máxima (`maxmemory`) é atingida — evita que o Redis simplesmente pare de aceitar escritas.
+```
+CONFIG SET maxmemory-policy allkeys-lru
+```
+
+**Políticas mais comuns de `maxmemory-policy`:**
+| Política | Comportamento |
+|---|---|
+| `noeviction` (padrão) | Recusa novas escritas quando a memória enche — **não perde dados**, mas quebra a aplicação. |
+| `allkeys-lru` | Remove as chaves menos acessadas recentemente, entre **todas** as chaves. |
+| `volatile-lru` | Remove as menos acessadas, mas **só entre as chaves que têm TTL definido**. |
+| `volatile-ttl` | Remove primeiro as chaves com TTL mais próximo de expirar. |
+
+---
+
+## 5. Habilite autenticação e TLS
+
+**Contexto:** por padrão, um Redis local não exige senha — inaceitável se o servidor for exposto em rede. Em produção (como no Redis Cloud que já usamos), use senha (ou ACL) e conexão criptografada (TLS).
+
+**1)** Verifica qual usuário está autenticado na conexão atual.
+```
+ACL WHOAMI
+```
+
+**2)** Lista os usuários/regras de acesso configurados no servidor.
+```
+ACL LIST
+```
+
+**3)** Define uma senha simples para o usuário padrão (forma mais básica de autenticação — o Redis Cloud já faz isso por você).
+```
+CONFIG SET requirepass "minhaSenhaForte123"
+```
+
+**4)** A partir daí, toda nova conexão precisa se autenticar antes de rodar qualquer comando.
+```
+AUTH minhaSenhaForte123
+```
+
+**5) (Mais avançado)** Cria um usuário com permissão **apenas de leitura**, restrito a um padrão de chaves — útil para dar acesso a um serviço de relatórios, por exemplo, sem risco de ele escrever ou apagar dados.
+```
+ACL SETUSER relatorios on >senhaRelatorios ~produto:* +get +mget
+```
+
+**❌ Evite:** deixar `requirepass` vazio (ou usar a senha default) em qualquer ambiente acessível pela internet — é a causa mais comum de "sequestro" de instâncias Redis mal configuradas.
+
+---
+
+## 6. Cuidado com comandos O(N)
+
+**Contexto:** comandos como `SMEMBERS`, `LRANGE` (sem limite), `HGETALL` e `KEYS` custam tempo proporcional ao **tamanho da coleção** — em coleções grandes, isso pode travar o event loop do Redis (lembre-se: é single-thread).
+
+**1)** Cria um set com vários itens, simulando uma coleção que cresceu com o tempo.
+```
+SADD tags:grande tag1 tag2 tag3 tag4 tag5 tag6 tag7 tag8 tag9 tag10
+```
+
+**2) ❌ Arriscado em coleções muito grandes** — traz **todos** os itens de uma vez.
+```
+SMEMBERS tags:grande
+```
+
+**3) ✅ Alternativa paginada** — traz um lote por vez, sem travar o servidor, igual ao `SCAN` do item 3.
+```
+SSCAN tags:grande 0 COUNT 5
+```
+
+**4)** O mesmo cuidado vale para Listas: evite ler tudo de uma vez em listas grandes...
+```
+LRANGE fila:pedidos 0 -1
+```
+**5)** ...prefira ler em páginas menores, especificando um intervalo (aqui, os 10 primeiros itens).
+```
+LRANGE fila:pedidos 0 9
+```
+
+---
+
+## Resumo rápido (cheat sheet desta seção)
+
+| Boa prática | Comando-chave |
+|---|---|
+| Nomear chaves com padrão | `entidade:id:atributo` |
+| Definir TTL | `EXPIRE`, `SET ... EX`, `TTL`, `PERSIST` |
+| Evitar `KEYS *` | `SCAN cursor MATCH padrão COUNT n` |
+| Monitorar memória | `INFO memory`, `MEMORY USAGE`, `CONFIG SET maxmemory-policy` |
+| Autenticação e TLS | `ACL WHOAMI`, `ACL LIST`, `ACL SETUSER`, `AUTH` |
+| Evitar comandos O(N) | `SSCAN`, `HSCAN`, `ZSCAN`, `LRANGE` com intervalo limitado |
