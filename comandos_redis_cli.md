@@ -566,6 +566,119 @@ LRANGE fila:pedidos 0 9
 
 ---
 
+## 7. Armazenamento Persistente
+
+**Contexto:** o Redis mantém os dados em memória, mas pode gravá-los em disco para que sejam recuperados após uma reinicialização. Existem duas estratégias principais: RDB, que salva snapshots do estado dos dados, e AOF, que registra as operações realizadas.
+
+### RDB — Snapshot
+
+**1)** Verifica a configuração atual dos snapshots automáticos.
+```
+CONFIG GET save
+```
+
+**2)** Configura o Redis para realizar um snapshot quando houver pelo menos 5 alterações em 60 segundos.
+```
+CONFIG SET save "60 5"
+```
+
+**3)** Cria alguns dados.
+```
+SET produto:1 "Notebook"
+SET produto:2 "Mouse"
+SET produto:3 "Teclado"
+SET produto:4 "Monitor"
+SET produto:5 "Webcam"
+```
+
+**4)** Força a criação de um snapshot imediatamente, em segundo plano.
+```
+BGSAVE
+```
+
+**5)** Verifica o diretório onde o arquivo será gravado.
+```
+CONFIG GET dir
+```
+
+O arquivo gerado será:
+```
+dump.rdb
+```
+
+**6)** No terminal do sistema operacional, acessa o diretório informado anteriormente.
+```
+cd <diretorio>
+```
+
+**7)** Verifica o arquivo gerado.
+```
+ls -lh dump.rdb
+```
+
+**❌ Evite:** visualizar o arquivo `dump.rdb` com `cat` — ele é binário, e seu conteúdo não deve ser aberto dessa forma.
+
+---
+
+### AOF — Append Only File
+
+**1)** Verifica se o AOF está habilitado.
+```
+CONFIG GET appendonly
+```
+
+**2)** Habilita a persistência AOF.
+```
+CONFIG SET appendonly yes
+```
+
+**3)** Define a sincronização do arquivo aproximadamente a cada segundo.
+```
+CONFIG SET appendfsync everysec
+```
+
+**4)** Cria alguns dados.
+```
+SET aluno:1 "Ana"
+SET aluno:2 "João"
+SET aluno:3 "Maria"
+```
+
+**5)** Verifica o diretório onde os arquivos do Redis são armazenados.
+```
+CONFIG GET dir
+```
+
+**6)** Verifica o diretório utilizado pelos arquivos AOF.
+```
+CONFIG GET appenddirname
+```
+
+**7)** No terminal, acessa o diretório dos arquivos AOF.
+```
+cd <diretorio>/<appenddirname>
+```
+
+**8)** Lista os arquivos de persistência.
+```
+ls -lh
+```
+
+**9)** Exibe o conteúdo dos arquivos AOF.
+```
+cat *.aof
+```
+
+O AOF registra as operações realizadas no Redis, permitindo reconstruir os dados durante a inicialização.
+
+**10)** Solicita uma reescrita do AOF para reduzir seu tamanho, mantendo o estado atual dos dados.
+```
+BGREWRITEAOF
+```
+
+---
+
+
 ## Resumo rápido (cheat sheet desta seção)
 
 | Boa prática | Comando-chave |
